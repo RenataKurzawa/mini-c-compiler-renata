@@ -45,6 +45,9 @@ jobs:
         ls -lh minicc
         valgrind $VALGRIND_OPTS ./minicc -h || true 
 
+    - name: Install test files
+      run: make install-tests
+      
     - name: Run lexer tests
       run: |
         chmod +x tests/lex/run.sh
@@ -57,9 +60,6 @@ jobs:
         chmod +x tests/syntax/run.sh
         export VALGRIND_MINICC="valgrind $VALGRIND_OPTS"
         bash tests/syntax/run.sh
-
-    - name: Install test files
-      run: make install-tests
 
     - name: Test LLVM IR generation (basic) with Valgrind
       run: |

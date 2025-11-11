@@ -879,7 +879,8 @@ void free_ast(ast_node_t *node)
 		break;
 
 	case AST_IDENTIFIER:
-		free(node->data.identifier.name);
+		if (node->data.identifier.name)  
+			free(node->data.identifier.name);
 		free_type_info(&node->data.identifier.type);
 		break;
 

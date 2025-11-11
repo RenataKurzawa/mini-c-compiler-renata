@@ -2,7 +2,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "ast.h"
 #include "symbol_table.h"
-#include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +19,41 @@ symbol_table_t *global_symbol_table = NULL;
 // Error recovery globals
 int error_count = 0;
 int max_errors = 20;
+static type_info_t current_decl_spec;
+
+// Portable string duplication function
+static char *string_duplicate(const char *str) {
+    if (!str) return NULL;
+    size_t len = strlen(str) + 1;
+    char *copy = malloc(len);
+    if (!copy) {
+        fprintf(stderr, "Memory allocation failed\n");
+        
+    }
+    strcpy(copy, str);
+    return copy;
+}
+
+// Deep copy function for type_info_t with proper memory management
+//static type_info_t deep_copy_type_info(const type_info_t *src) {
+//    type_info_t result;
+//    result.base_type = src->base_type ? string_duplicate(src->base_type) : NULL;
+//    result.pointer_level = src->pointer_level;
+//    result.is_array = src->is_array;
+//    result.is_vla = src->is_vla;
+//    result.is_function = src->is_function;
+//    result.is_struct = src->is_struct;
+//    result.is_union = src->is_union;
+//    result.is_enum = src->is_enum;
+//    result.is_incomplete = src->is_incomplete;
+//    result.storage_class = src->storage_class;
+//    result.qualifiers = src->qualifiers;
+//    result.array_size = NULL; // Don't copy AST nodes - they're managed separately
+//    result.param_types = NULL; // Don't copy param arrays - they're managed separately
+//    result.param_count = src->param_count;
+//    result.is_variadic = src->is_variadic;
+//    return result;
+//}
 
 // Helper to merge declaration specifiers and declarator with proper cleanup
 static type_info_t make_complete_type(type_info_t base_type, declarator_t decl) {
@@ -105,15 +139,6 @@ static void cleanup_type_info(type_info_t *type_info) {
         enum_value_t **values;
         int count;
     } enum_array;
-    struct {
-        declarator_t declarator;
-        ast_node_t *initializer;
-    } declarator_info;
-    struct {
-        declarator_t *declarators;
-        ast_node_t **initializers;
-        int count;
-    } declarator_list;
 }
 
 /* Tokens */
@@ -141,7 +166,7 @@ static void cleanup_type_info(type_info_t *type_info) {
 
 /* Non-terminals */
 %type <node> translation_unit external_declaration function_definition
-%type <node> declaration declaration_list initializer
+%type <node> declaration declaration_list init_declarator_list init_declarator initializer
 %type <node> statement labeled_statement compound_statement expression_statement
 %type <node> selection_statement iteration_statement jump_statement
 %type <node> primary_expression postfix_expression unary_expression cast_expression
@@ -157,8 +182,6 @@ static void cleanup_type_info(type_info_t *type_info) {
 %type <type_info> struct_or_union_specifier enum_specifier type_name
 
 %type <declarator> declarator direct_declarator pointer
-%type <declarator_info> init_declarator
-%type <declarator_list> init_declarator_list
 %type <storage_class> storage_class_specifier function_specifier
 %type <qualifier> type_qualifier type_qualifier_list
 
@@ -199,61 +222,18 @@ static void cleanup_type_info(type_info_t *type_info) {
 /* Top level */
 translation_unit
     : external_declaration {
-        ast_node_t **decls;
-        int count = 0;
-        
-        if ($1) {
-            // Check if this is a compound statement (multiple declarations)
-            if ($1->type == AST_COMPOUND_STMT) {
-                count = $1->data.compound.stmt_count;
-                decls = malloc(count * sizeof(ast_node_t*));
-                for (int i = 0; i < count; i++) {
-                    decls[i] = $1->data.compound.statements[i];
-                }
-                // Free the wrapper but keep the statements
-                $1->data.compound.statements = NULL;
-                $1->data.compound.stmt_count = 0;
-                free_ast($1);
-            } else {
-                count = 1;
-                decls = malloc(sizeof(ast_node_t*));
-                decls[0] = $1;
-            }
-        } else {
-            decls = NULL;
-        }
-        
-        $$ = create_program(decls, count);
+        ast_node_t **decls = malloc(sizeof(ast_node_t*));
+        decls[0] = $1;
+        $$ = create_program(decls, $1 ? 1 : 0);
         ast_root = $$;
     }
     | translation_unit external_declaration {
         if ($2) {
-            // Check if this is a compound statement (multiple declarations)
-            if ($2->type == AST_COMPOUND_STMT) {
-                int new_count = $2->data.compound.stmt_count;
-                $$ = $1;
-                
-                int old_count = $$->data.program.decl_count;
-                $$->data.program.decl_count += new_count;
-                $$->data.program.declarations = realloc($$->data.program.declarations,
-                                                       $$->data.program.decl_count * sizeof(ast_node_t*));
-                
-                for (int i = 0; i < new_count; i++) {
-                    $$->data.program.declarations[old_count + i] = 
-                        $2->data.compound.statements[i];
-                }
-                
-                // Free the wrapper but keep the statements
-                $2->data.compound.statements = NULL;
-                $2->data.compound.stmt_count = 0;
-                free_ast($2);
-            } else {
-                $$ = $1;
-                $$->data.program.decl_count++;
-                $$->data.program.declarations = realloc($$->data.program.declarations,
-                                                       $$->data.program.decl_count * sizeof(ast_node_t*));
-                $$->data.program.declarations[$$->data.program.decl_count - 1] = $2;
-            }
+            $$ = $1;
+            $$->data.program.decl_count++;
+            $$->data.program.declarations = realloc($$->data.program.declarations,
+                                                   $$->data.program.decl_count * sizeof(ast_node_t*));
+            $$->data.program.declarations[$$->data.program.decl_count - 1] = $2;
         } else {
             $$ = $1;
         }
@@ -271,8 +251,8 @@ external_declaration
 function_definition
     : declaration_specifiers declarator declaration_list compound_statement {
         type_info_t func_type = make_complete_type($1, $2);
-        $$ = create_function(string_duplicate($2.name), func_type, NULL, 0, $4);
-        free($2.name);
+        $$ = create_function($2.name, func_type, NULL, 0, $4);
+        $2.name = NULL;
         cleanup_type_info(&$1);
         // func_type is now owned by the function node
     }
@@ -286,8 +266,8 @@ function_definition
             param_count = $2.param_count;
         }
 
-        $$ = create_function(string_duplicate($2.name), func_type, params, param_count, $3);
-        free($2.name);
+        $$ = create_function($2.name, func_type, params, param_count, $3);
+        $2.name = NULL;
         cleanup_type_info(&$1);
         // func_type is now owned by the function node
     }
@@ -334,32 +314,39 @@ declaration_specifiers
     ;
 
 init_declarator_list
-    : init_declarator {
-        $$.declarators = malloc(sizeof(declarator_t));
-        $$.initializers = malloc(sizeof(ast_node_t*));
-        $$.declarators[0] = $1.declarator;
-        $$.initializers[0] = $1.initializer;
-        $$.count = 1;
-    }
-    | init_declarator_list COMMA init_declarator {
-        $$.count = $1.count + 1;
-        $$.declarators = realloc($1.declarators, $$.count * sizeof(declarator_t));
-        $$.initializers = realloc($1.initializers, $$.count * sizeof(ast_node_t*));
-        $$.declarators[$$.count - 1] = $3.declarator;
-        $$.initializers[$$.count - 1] = $3.initializer;
-    }
+    : init_declarator { $$ = $1; }
+    | init_declarator_list COMMA init_declarator { $$ = $3; }
     ;
 
 init_declarator
-    : declarator {
-        $$.declarator = $1;
-        $$.initializer = NULL;
-    }
-    | declarator ASSIGN initializer {
-        $$.declarator = $1;
-        $$.initializer = $3;
-    }
+    : declarator
+      {
+        type_info_t t = make_complete_type(current_decl_spec, $1);
+        if ($1.is_array) {
+          $$ = create_array_declaration(t, $1.name, $1.array_size);
+           $$->data.array_decl.is_vla = ($1.array_size && $1.array_size->type != AST_NUMBER);
+           $1.name = NULL; // transfere ownership
+        } else {
+         $$ = create_declaration(t, $1.name, NULL);
+         $1.name = NULL; // transfere ownership
+        }
+      }
+    | declarator ASSIGN initializer
+      {
+        type_info_t t = make_complete_type(current_decl_spec, $1);
+        if ($1.is_array) {
+          /* Mini-C: por enquanto não suportamos init-list de array (ex.: int a[3]={...}) */
+          yyerror("initializer for array not supported in Mini-C");
+          $$ = create_array_declaration(t, $1.name, $1.array_size);
+          $$->data.array_decl.is_vla = ($1.array_size && $1.array_size->type != AST_NUMBER);
+          $1.name = NULL;
+        } else {
+           $$ = create_declaration(t, $1.name, $3);
+          $1.name = NULL;
+        }
+      }
     ;
+
 
 storage_class_specifier
     : TYPEDEF { $$ = STORAGE_TYPEDEF; }
@@ -438,7 +425,8 @@ struct_declaration
         for (int i = 0; i < $$.count; i++) {
             member_info_t *member = &$2.members[i];
             type_info_t member_type = make_complete_type($1, make_declarator(member->name, 0, 0, NULL));
-            $$.nodes[i] = create_declaration(member_type, string_duplicate(member->name), NULL);
+            $$.nodes[i] = create_declaration(member_type, member->name, NULL); // transfere ownership
+            member->name = NULL; 
         }
         free($2.members);
         cleanup_type_info(&$1);
@@ -481,7 +469,6 @@ struct_declarator
     : declarator {
         $$ = create_member_info(string_duplicate($1.name),
                                create_type_info(string_duplicate("int"), $1.pointer_level, $1.is_array, $1.array_size), 0);
-        free($1.name);
     }
     | COLON constant_expression {
         $$ = create_member_info(string_duplicate(""),
@@ -494,7 +481,6 @@ struct_declarator
                                create_type_info(string_duplicate("int"), $1.pointer_level, $1.is_array, $1.array_size),
                                $3->data.number.value);
         $$->bit_field_expr = $3;
-        free($1.name);
     }
     ;
 
@@ -686,8 +672,8 @@ parameter_list
 parameter_declaration
     : declaration_specifiers declarator {
         type_info_t param_type = make_complete_type($1, $2);
-        $$ = create_parameter(param_type, string_duplicate($2.name));
-        free($2.name);
+        $$ = create_parameter(param_type, $2.name);
+        $2.name = NULL;
         cleanup_type_info(&$1);
     }
     | declaration_specifiers abstract_declarator {
@@ -744,8 +730,7 @@ statement
 
 labeled_statement
     : IDENTIFIER COLON statement {
-        $$ = create_label_stmt(string_duplicate($1), $3);
-        free($1);
+        $$ = create_label_stmt($1, $3);
     }
     | CASE constant_expression COLON statement {
         $$ = create_case_stmt($2, $4);
@@ -767,20 +752,9 @@ compound_statement
 block_item_list
     : statement {
         if ($1) {
-            // Check if statement is a compound (multiple declarations)
-            if ($1->type == AST_COMPOUND_STMT) {
-                // Flatten it
-                $$.nodes = $1->data.compound.statements;
-                $$.count = $1->data.compound.stmt_count;
-                // Don't free the statements, just the wrapper
-                $1->data.compound.statements = NULL;
-                $1->data.compound.stmt_count = 0;
-                free_ast($1);
-            } else {
-                $$.nodes = malloc(sizeof(ast_node_t*));
-                $$.nodes[0] = $1;
-                $$.count = 1;
-            }
+            $$.nodes = malloc(sizeof(ast_node_t*));
+            $$.nodes[0] = $1;
+            $$.count = 1;
         } else {
             $$.nodes = NULL;
             $$.count = 0;
@@ -788,24 +762,9 @@ block_item_list
     }
     | block_item_list statement {
         if ($2) {
-            // Check if statement is a compound (multiple declarations)
-            if ($2->type == AST_COMPOUND_STMT) {
-                // Flatten it into the list
-                int new_items = $2->data.compound.stmt_count;
-                $$.count = $1.count + new_items;
-                $$.nodes = realloc($1.nodes, $$.count * sizeof(ast_node_t*));
-                for (int i = 0; i < new_items; i++) {
-                    $$.nodes[$1.count + i] = $2->data.compound.statements[i];
-                }
-                // Don't free the statements, just the wrapper
-                $2->data.compound.statements = NULL;
-                $2->data.compound.stmt_count = 0;
-                free_ast($2);
-            } else {
-                $$.count = $1.count + 1;
-                $$.nodes = realloc($1.nodes, $$.count * sizeof(ast_node_t*));
-                $$.nodes[$$.count - 1] = $2;
-            }
+            $$.count = $1.count + 1;
+            $$.nodes = realloc($1.nodes, $$.count * sizeof(ast_node_t*));
+            $$.nodes[$$.count - 1] = $2;
         } else {
             $$ = $1;
         }
@@ -837,15 +796,25 @@ iteration_statement
         $$ = create_do_while_stmt($2, $5);
     }
     | FOR LPAREN expression_statement expression_statement RPAREN statement {
-        ast_node_t *init = ($3->data.expr_stmt.expr) ?
-        $3->data.expr_stmt.expr : NULL;
-        ast_node_t *cond = ($4->data.expr_stmt.expr) ? $4->data.expr_stmt.expr : NULL;
+    ast_node_t *init = ($3->data.expr_stmt.expr) ? $3->data.expr_stmt.expr : NULL;
+    ast_node_t *cond = ($4->data.expr_stmt.expr) ? $4->data.expr_stmt.expr : NULL;
+
+        $3->data.expr_stmt.expr = NULL;
+        $4->data.expr_stmt.expr = NULL;
+        free_ast($3);
+        free_ast($4);
+
         $$ = create_for_stmt(init, cond, NULL, $6);
     }
     | FOR LPAREN expression_statement expression_statement expression RPAREN statement {
-        ast_node_t *init = ($3->data.expr_stmt.expr) ?
-        $3->data.expr_stmt.expr : NULL;
+        ast_node_t *init = ($3->data.expr_stmt.expr) ? $3->data.expr_stmt.expr : NULL;
         ast_node_t *cond = ($4->data.expr_stmt.expr) ? $4->data.expr_stmt.expr : NULL;
+
+        $3->data.expr_stmt.expr = NULL;
+        $4->data.expr_stmt.expr = NULL;
+        free_ast($3);
+        free_ast($4);
+
         $$ = create_for_stmt(init, cond, $5, $7);
     }
     | FOR LPAREN declaration expression_statement RPAREN statement {
@@ -862,8 +831,7 @@ iteration_statement
 
 jump_statement
     : GOTO IDENTIFIER SEMICOLON {
-        $$ = create_goto_stmt(string_duplicate($2));
-        free($2);
+        $$ = create_goto_stmt($2);
     }
     | CONTINUE SEMICOLON {
         $$ = create_continue_stmt();
@@ -882,8 +850,7 @@ jump_statement
 /* Expressions */
 primary_expression
     : IDENTIFIER {
-        $$ = create_identifier(string_duplicate($1));
-        free($1);
+        $$ = create_identifier($1); 
     }
     | CONSTANT {
         $$ = create_number($1);
@@ -892,8 +859,7 @@ primary_expression
         $$ = create_character($1);
     }
     | STRING_LITERAL {
-        $$ = create_string_literal(string_duplicate($1));
-        free($1);
+        $$ = create_string_literal($1); // transfere ownership
     }
     | LPAREN expression RPAREN {
         $$ = $2;
@@ -907,25 +873,37 @@ postfix_expression
     }
     | postfix_expression LPAREN RPAREN {
         if ($1->type == AST_IDENTIFIER) {
-            $$ = create_call($1->data.identifier.name, NULL, 0);
+            char *name = $1->data.identifier.name;
+            $$ = create_call(name, NULL, 0);
+            $1->data.identifier.name = NULL; 
+            free_ast($1);
         } else {
+            free_ast($1);
             $$ = create_error_expression();
         }
     }
     | postfix_expression LPAREN argument_expression_list RPAREN {
         if ($1->type == AST_IDENTIFIER) {
-            $$ = create_call($1->data.identifier.name, $3.nodes, $3.count);
+            char *name = $1->data.identifier.name; 
+            $$ = create_call(name, $3.nodes, $3.count);
+            $1->data.identifier.name = NULL;      
+            free_ast($1);             
         } else {
+            free_ast($1);
+            if ($3.nodes) {
+                for (int i = 0; i < $3.count; i++) {
+                    if ($3.nodes[i]) free_ast($3.nodes[i]);
+                }
+                free($3.nodes);
+            }
             $$ = create_error_expression();
         }
     }
     | postfix_expression DOT IDENTIFIER {
-        $$ = create_member_access($1, string_duplicate($3));
-        free($3);
+        $$ = create_member_access($1, $3);
     }
     | postfix_expression PTR_OP IDENTIFIER {
-        $$ = create_ptr_member_access($1, string_duplicate($3));
-        free($3);
+       $$ = create_ptr_member_access($1, $3); // transfere ownership
     }
     | postfix_expression INC_OP {
         $$ = create_unary_op(OP_POSTINC, $1);
@@ -1108,8 +1086,13 @@ assignment_expression
     | unary_expression assignment_operator assignment_expression {
         if ($2 == OP_ASSIGN) {
             if ($1->type == AST_IDENTIFIER) {
-                $$ = create_assignment($1->data.identifier.name, $3);
+                
+                char *name = $1->data.identifier.name;
+                $$ = create_assignment(name, $3);
+                $1->data.identifier.name = NULL; 
+                free_ast($1);                    
             } else {
+                
                 $$ = create_assignment_to_lvalue($1, $3);
             }
         } else {
@@ -1135,8 +1118,10 @@ assignment_operator
 expression
     : assignment_expression { $$ = $1; }
     | expression COMMA assignment_expression {
-        // For now, just return the right side of comma
+        ast_node_t *left = $1;
         $$ = $3;
+        // For now, just return the right side of comma
+        if (left) free_ast(left);
     }
     ;
 
@@ -1197,46 +1182,24 @@ designator
 
 /* Top-level declaration handling */
 declaration
-    : declaration_specifiers init_declarator_list SEMICOLON {
-        // Create a declaration for each declarator with proper type
-        if ($2.count == 1) {
-            // Single declarator - return it directly
-            type_info_t complete_type = make_complete_type($1, $2.declarators[0]);
-            $$ = create_declaration(complete_type, 
-                                   string_duplicate($2.declarators[0].name), 
-                                   $2.initializers[0]);
-            
-            // Clean up
-            free($2.declarators[0].name);
-            free($2.declarators);
-            free($2.initializers);
-            cleanup_type_info(&$1);
-        } else {
-            // Multiple declarators - create a compound statement containing all declarations
-            ast_node_t **decls = malloc($2.count * sizeof(ast_node_t*));
-            
-            for (int i = 0; i < $2.count; i++) {
-                type_info_t complete_type = make_complete_type($1, $2.declarators[i]);
-                decls[i] = create_declaration(complete_type,
-                                             string_duplicate($2.declarators[i].name),
-                                             $2.initializers[i]);
-                free($2.declarators[i].name);
-            }
-            
-            // Create a compound statement to hold all declarations
-            // This allows the rest of the parser to treat it as a single statement
-            $$ = create_compound_stmt(decls, $2.count);
-            
-            // Clean up
-            free($2.declarators);
-            free($2.initializers);
-            cleanup_type_info(&$1);
-        }
-    }
-    | declaration_specifiers SEMICOLON {
+    : declaration_specifiers
+      {
+        /* guarda os specifiers da declaração atual (int, const, etc.) */
+        current_decl_spec = deep_copy_type_info(& $1);
+        cleanup_type_info(& $1);
+      }
+      init_declarator_list SEMICOLON
+      {
+        /* a lista (ou o último item, no seu caso) já foi construída nos init_declarator */
+        $$ = $3;
+        cleanup_type_info(&current_decl_spec);
+      }
+    | declaration_specifiers SEMICOLON
+      {
+        /* declaração só com specifiers (ex.: typedefs em outras gramáticas); aqui você ignora */
         $$ = NULL;
-        cleanup_type_info(&$1);
-    }
+        cleanup_type_info(& $1);
+      }
     ;
 
 %%
@@ -1247,6 +1210,6 @@ void yyerror(const char *s) {
 
     if (error_count >= max_errors) {
         fprintf(stderr, "Too many errors (%d), stopping compilation.\n", max_errors);
-        exit(1);
+        
     }
 }
