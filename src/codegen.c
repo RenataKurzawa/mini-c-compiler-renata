@@ -67,24 +67,34 @@ static inline void free_type_string(type_string_t *ts)
 // Helper functions
 static size_t get_basic_type_size(const char *type_name)
 {
-	if (!type_name)
+	if (!type_name) {
 		return 4;
-	if (strcmp(type_name, "char") == 0)
+	}
+	if (strstr(type_name, "long")) {
+		return 8;
+	}
+
+	if (strcmp(type_name, "char") == 0) {
 		return 1;
-	if (strcmp(type_name, "short") == 0)
+	}
+	if (strcmp(type_name, "short") == 0) {
 		return 2;
-	if (strcmp(type_name, "int") == 0)
+	}
+	if (strcmp(type_name, "int") == 0) {
 		return 4;
-	if (strcmp(type_name, "long") == 0)
-		return 8;
-	if (strcmp(type_name, "float") == 0)
+	}
+	if (strcmp(type_name, "float") == 0) {
 		return 4;
-	if (strcmp(type_name, "double") == 0)
+	}
+	if (strcmp(type_name, "double") == 0) {
 		return 8;
-	if (strcmp(type_name, "_Bool") == 0)
+	}
+	if (strcmp(type_name, "_Bool") == 0) {
 		return 1;
-	if (strstr(type_name, "int"))
+	}
+	if (strstr(type_name, "int")) {
 		return 4;
+	}
 	return 4;
 }
 
@@ -144,7 +154,7 @@ static char *get_llvm_type_string(type_info_t *type_info)
 			strcpy(result, "i16");
 		} else if (strcmp(type_info->base_type, "int") == 0) {
 			strcpy(result, "i32");
-		} else if (strcmp(type_info->base_type, "long") == 0) {
+		} else if (strstr(type_info->base_type, "long")) {
 			strcpy(result, "i64");
 		} else if (strcmp(type_info->base_type, "float") == 0) {
 			strcpy(result, "float");
@@ -174,7 +184,7 @@ static char *get_llvm_type_string(type_info_t *type_info)
 		strcpy(result, "i16");
 	} else if (strcmp(type_info->base_type, "int") == 0) {
 		strcpy(result, "i32");
-	} else if (strcmp(type_info->base_type, "long") == 0) {
+	} else if (strstr(type_info->base_type, "long")) {
 		strcpy(result, "i64");
 	} else if (strcmp(type_info->base_type, "float") == 0) {
 		strcpy(result, "float");
@@ -357,6 +367,16 @@ static int convert_to_boolean(ast_node_t *expr, int expr_temp)
 static int cast_value(int val_temp, type_info_t *src_type, type_info_t *dest_type)
 {
 	char *src_str = get_llvm_type_string(src_type);
+
+	if (src_type->is_array) {
+		char *decayed_ptr = malloc(strlen(src_str) + 2);
+		if (decayed_ptr) {
+			sprintf(decayed_ptr, "%s*", src_str);
+			free(src_str);
+			src_str = decayed_ptr;
+		}
+	}
+
 	char *dest_str = get_llvm_type_string(dest_type);
 
 	if (strcmp(src_str, dest_str) == 0) {
@@ -380,14 +400,12 @@ static int cast_value(int val_temp, type_info_t *src_type, type_info_t *dest_typ
 			// Sign extend (e.g., int to long)
 			fprintf(ctx.output, "  %%t%d = sext %s %%t%d to %s\n", new_temp, src_str, val_temp, dest_str);
 		}
-	} else if (src_type->pointer_level > 0 && dest_str[0] == 'i' && strchr(dest_str, '*') == NULL) {
-		// Pointer to Int
+	} else if ((src_type->pointer_level > 0 || src_type->is_array) && dest_str[0] == 'i' &&
+		   strchr(dest_str, '*') == NULL) {
 		fprintf(ctx.output, "  %%t%d = ptrtoint %s %%t%d to %s\n", new_temp, src_str, val_temp, dest_str);
 	} else if (src_str[0] == 'i' && strchr(src_str, '*') == NULL && dest_type->pointer_level > 0) {
-		// Int to Pointer
 		fprintf(ctx.output, "  %%t%d = inttoptr %s %%t%d to %s\n", new_temp, src_str, val_temp, dest_str);
 	} else {
-		// Fallback: Bitcast (generic, includes pointer-to-pointer)
 		fprintf(ctx.output, "  %%t%d = bitcast %s %%t%d to %s\n", new_temp, src_str, val_temp, dest_str);
 	}
 
@@ -458,9 +476,12 @@ static int generate_expression(ast_node_t *node)
 					element_type[strlen(element_type) - 1] = '\0'; // Remove one *
 				}
 				size_t array_length = get_array_length(sym, ctx.symbol_table);
+				const char *prefix = sym->is_global ? "@" : "%";
+
 				fprintf(ctx.output,
-					"  %%t%d = getelementptr [%zu x %s], [%zu x %s]* %%%s, i32 0, i32 0\n", temp,
-					array_length, element_type, array_length, element_type, sym->llvm_name);
+					"  %%t%d = getelementptr [%zu x %s], [%zu x %s]* %s%s, i32 0, i32 0\n", temp,
+					array_length, element_type, array_length, element_type, prefix, sym->llvm_name);
+
 				free(element_type);
 			}
 		} else {
@@ -498,7 +519,8 @@ static int generate_expression(ast_node_t *node)
 			} else {
 				left_bool = get_next_temp();
 				char left_str[32];
-				if (node->data.binary_op.left->type == AST_NUMBER) {
+				if (node->data.binary_op.left->type == AST_NUMBER ||
+				    node->data.binary_op.left->type == AST_CHARACTER) {
 					snprintf(left_str, sizeof(left_str), "%d", left);
 				} else {
 					snprintf(left_str, sizeof(left_str), "%%t%d", left);
@@ -534,7 +556,8 @@ static int generate_expression(ast_node_t *node)
 			} else {
 				right_bool = get_next_temp();
 				char right_str[32];
-				if (node->data.binary_op.right->type == AST_NUMBER) {
+				if (node->data.binary_op.right->type == AST_NUMBER ||
+				    node->data.binary_op.right->type == AST_CHARACTER) {
 					snprintf(right_str, sizeof(right_str), "%d", right);
 				} else {
 					snprintf(right_str, sizeof(right_str), "%%t%d", right);
@@ -597,13 +620,15 @@ static int generate_expression(ast_node_t *node)
 			char idx_str[32];
 
 			if (left_type.pointer_level > 0 || left_type.is_array) {
-				if (node->data.binary_op.left->type == AST_NUMBER) {
+				if (node->data.binary_op.left->type == AST_NUMBER ||
+				    node->data.binary_op.left->type == AST_CHARACTER) {
 					snprintf(ptr_str, sizeof(ptr_str), "%d", ptr_val);
 				} else {
 					snprintf(ptr_str, sizeof(ptr_str), "%%t%d", ptr_val);
 				}
 			} else {
-				if (node->data.binary_op.right->type == AST_NUMBER) {
+				if (node->data.binary_op.right->type == AST_NUMBER ||
+				    node->data.binary_op.right->type == AST_CHARACTER) {
 					snprintf(ptr_str, sizeof(ptr_str), "%d", ptr_val);
 				} else {
 					snprintf(ptr_str, sizeof(ptr_str), "%%t%d", ptr_val);
@@ -611,13 +636,15 @@ static int generate_expression(ast_node_t *node)
 			}
 
 			if (left_type.pointer_level > 0 || left_type.is_array) {
-				if (node->data.binary_op.right->type == AST_NUMBER) {
+				if (node->data.binary_op.right->type == AST_NUMBER ||
+				    node->data.binary_op.right->type == AST_CHARACTER) {
 					snprintf(idx_str, sizeof(idx_str), "%d", idx_val);
 				} else {
 					snprintf(idx_str, sizeof(idx_str), "%%t%d", idx_val);
 				}
 			} else {
-				if (node->data.binary_op.left->type == AST_NUMBER) {
+				if (node->data.binary_op.left->type == AST_NUMBER ||
+				    node->data.binary_op.left->type == AST_CHARACTER) {
 					snprintf(idx_str, sizeof(idx_str), "%d", idx_val);
 				} else {
 					snprintf(idx_str, sizeof(idx_str), "%%t%d", idx_val);
@@ -652,13 +679,15 @@ static int generate_expression(ast_node_t *node)
 			char ptr_str[32];
 			char idx_str[32];
 
-			if (node->data.binary_op.left->type == AST_NUMBER) {
+			if (node->data.binary_op.left->type == AST_NUMBER ||
+			    node->data.binary_op.left->type == AST_CHARACTER) {
 				snprintf(ptr_str, sizeof(ptr_str), "%d", left);
 			} else {
 				snprintf(ptr_str, sizeof(ptr_str), "%%t%d", left);
 			}
 
-			if (node->data.binary_op.right->type == AST_NUMBER) {
+			if (node->data.binary_op.right->type == AST_NUMBER ||
+			    node->data.binary_op.right->type == AST_CHARACTER) {
 				snprintf(idx_str, sizeof(idx_str), "%d", right);
 			} else {
 				snprintf(idx_str, sizeof(idx_str), "%%t%d", right);
@@ -692,13 +721,15 @@ static int generate_expression(ast_node_t *node)
 			char ptr_l_str[32];
 			char ptr_r_str[32];
 
-			if (node->data.binary_op.left->type == AST_NUMBER) {
+			if (node->data.binary_op.left->type == AST_NUMBER ||
+			    node->data.binary_op.left->type == AST_CHARACTER) {
 				snprintf(ptr_l_str, sizeof(ptr_l_str), "%d", left);
 			} else {
 				snprintf(ptr_l_str, sizeof(ptr_l_str), "%%t%d", left);
 			}
 
-			if (node->data.binary_op.right->type == AST_NUMBER) {
+			if (node->data.binary_op.right->type == AST_NUMBER ||
+			    node->data.binary_op.right->type == AST_CHARACTER) {
 				snprintf(ptr_r_str, sizeof(ptr_r_str), "%d", right);
 			} else {
 				snprintf(ptr_r_str, sizeof(ptr_r_str), "%%t%d", right);
@@ -755,7 +786,8 @@ static int generate_expression(ast_node_t *node)
 			int z = get_next_temp();
 			fprintf(ctx.output, "  %%t%d = zext i1 %%t%d to i32\n", z, left);
 			left_i32 = z;
-		} else if (node->data.binary_op.left->type != AST_NUMBER) {
+		} else if (node->data.binary_op.left->type != AST_NUMBER &&
+			   node->data.binary_op.left->type != AST_CHARACTER) {
 			// Cast char/short -> i32 (sext/zext)
 			left_i32 = cast_value(left, &left_type, &int_type);
 		}
@@ -766,7 +798,8 @@ static int generate_expression(ast_node_t *node)
 			int z = get_next_temp();
 			fprintf(ctx.output, "  %%t%d = zext i1 %%t%d to i32\n", z, right);
 			right_i32 = z;
-		} else if (node->data.binary_op.right->type != AST_NUMBER) {
+		} else if (node->data.binary_op.right->type != AST_NUMBER &&
+			   node->data.binary_op.right->type != AST_CHARACTER) {
 			right_i32 = cast_value(right, &right_type, &int_type);
 		}
 
@@ -784,12 +817,14 @@ static int generate_expression(ast_node_t *node)
 
 			char L[32];
 			char R[32];
-			if (node->data.binary_op.left->type == AST_NUMBER) {
+			if (node->data.binary_op.left->type == AST_NUMBER ||
+			    node->data.binary_op.left->type == AST_CHARACTER) {
 				snprintf(L, sizeof(L), "%d", left_i32);
 			} else {
 				snprintf(L, sizeof(L), "%%t%d", left_i32);
 			}
-			if (node->data.binary_op.right->type == AST_NUMBER) {
+			if (node->data.binary_op.right->type == AST_NUMBER ||
+			    node->data.binary_op.right->type == AST_CHARACTER) {
 				snprintf(R, sizeof(R), "%d", right_i32);
 			} else {
 				snprintf(R, sizeof(R), "%%t%d", right_i32);
@@ -840,12 +875,13 @@ static int generate_expression(ast_node_t *node)
 
 		char L[32];
 		char R[32];
-		if (node->data.binary_op.left->type == AST_NUMBER) {
+		if (node->data.binary_op.left->type == AST_NUMBER || node->data.binary_op.left->type == AST_CHARACTER) {
 			snprintf(L, sizeof(L), "%d", left_i32);
 		} else {
 			snprintf(L, sizeof(L), "%%t%d", left_i32);
 		}
-		if (node->data.binary_op.right->type == AST_NUMBER) {
+		if (node->data.binary_op.right->type == AST_NUMBER ||
+		    node->data.binary_op.right->type == AST_CHARACTER) {
 			snprintf(R, sizeof(R), "%d", right_i32);
 		} else {
 			snprintf(R, sizeof(R), "%%t%d", right_i32);
@@ -871,7 +907,8 @@ static int generate_expression(ast_node_t *node)
 			char *type_str = get_llvm_type_string(&sym->type_info);
 			int final_value = value;
 
-			if (node->data.assignment.value->type != AST_NUMBER) {
+			if (node->data.assignment.value->type != AST_NUMBER &&
+			    node->data.assignment.value->type != AST_CHARACTER) {
 				type_info_t rhs_type =
 					get_expression_type(node->data.assignment.value, ctx.symbol_table);
 				final_value = cast_value(value, &rhs_type, &sym->type_info);
@@ -880,7 +917,8 @@ static int generate_expression(ast_node_t *node)
 
 			// Store the value
 			if (sym->is_parameter) {
-				if (node->data.assignment.value->type == AST_NUMBER) {
+				if (node->data.assignment.value->type == AST_NUMBER ||
+				    node->data.assignment.value->type == AST_CHARACTER) {
 					if (sym->type_info.pointer_level > 0 && value == 0) {
 						fprintf(ctx.output, "  store %s null, %s* %%%s.addr\n", type_str,
 							type_str, sym->llvm_name);
@@ -894,7 +932,8 @@ static int generate_expression(ast_node_t *node)
 				}
 			} else {
 				const char *prefix = sym->is_global ? "@" : "%";
-				if (node->data.assignment.value->type == AST_NUMBER) {
+				if (node->data.assignment.value->type == AST_NUMBER ||
+				    node->data.assignment.value->type == AST_CHARACTER) {
 					if (sym->type_info.pointer_level > 0 && value == 0) {
 						fprintf(ctx.output, "  store %s null, %s* %s%s\n", type_str, type_str,
 							prefix, sym->llvm_name);
@@ -931,7 +970,7 @@ static int generate_expression(ast_node_t *node)
 					int addr_temp = get_next_temp();
 
 					char index_str[32];
-					if (index->type == AST_NUMBER) {
+					if (index->type == AST_NUMBER || index->type == AST_CHARACTER) {
 						snprintf(index_str, sizeof(index_str), "%d", index_val);
 					} else {
 						snprintf(index_str, sizeof(index_str), "%%t%d", index_val);
@@ -980,7 +1019,8 @@ static int generate_expression(ast_node_t *node)
 					}
 
 					int final_value = value;
-					if (node->data.assignment.value->type != AST_NUMBER) {
+					if (node->data.assignment.value->type != AST_NUMBER &&
+					    node->data.assignment.value->type != AST_CHARACTER) {
 						type_info_t rhs_type = get_expression_type(node->data.assignment.value,
 											   ctx.symbol_table);
 						type_info_t *lhs_type =
@@ -990,7 +1030,8 @@ static int generate_expression(ast_node_t *node)
 					}
 
 					// Store value
-					if (node->data.assignment.value->type == AST_NUMBER) {
+					if (node->data.assignment.value->type == AST_NUMBER ||
+					    node->data.assignment.value->type == AST_CHARACTER) {
 						fprintf(ctx.output, "  store %s %d, %s* %%t%d\n", element_type, value,
 							element_type, addr_temp);
 					} else {
@@ -1008,14 +1049,16 @@ static int generate_expression(ast_node_t *node)
 					&node->data.assignment.lvalue->data.dereference.result_type);
 
 				char ptr_str[32];
-				if (node->data.assignment.lvalue->data.dereference.operand->type == AST_NUMBER) {
+				if (node->data.assignment.lvalue->data.dereference.operand->type == AST_NUMBER ||
+				    node->data.assignment.lvalue->data.dereference.operand->type == AST_CHARACTER) {
 					snprintf(ptr_str, sizeof(ptr_str), "%d", ptr);
 				} else {
 					snprintf(ptr_str, sizeof(ptr_str), "%%t%d", ptr);
 				}
 
 				int final_value = value;
-				if (node->data.assignment.value->type != AST_NUMBER) {
+				if (node->data.assignment.value->type != AST_NUMBER &&
+				    node->data.assignment.value->type != AST_CHARACTER) {
 					type_info_t rhs_type =
 						get_expression_type(node->data.assignment.value, ctx.symbol_table);
 					type_info_t *lhs_type =
@@ -1024,7 +1067,8 @@ static int generate_expression(ast_node_t *node)
 					free_type_info(&rhs_type);
 				}
 
-				if (node->data.assignment.value->type == AST_NUMBER) {
+				if (node->data.assignment.value->type == AST_NUMBER ||
+				    node->data.assignment.value->type == AST_CHARACTER) {
 					fprintf(ctx.output, "  store %s %d, %s* %s\n", result_type, value, result_type,
 						ptr_str);
 				} else {
@@ -1152,61 +1196,87 @@ static int generate_expression(ast_node_t *node)
 		char *end_label = generate_label("cond_end");
 		int result_temp = get_next_temp();
 
-		// Get result type from true expression
-		char *result_type = get_llvm_type_string(&node->data.conditional.result_type);
-		fprintf(ctx.output, "  %%t%d.addr = alloca %s\n", result_temp, result_type);
+		type_info_t true_type = get_expression_type(node->data.conditional.true_expr, ctx.symbol_table);
+		type_info_t false_type = get_expression_type(node->data.conditional.false_expr, ctx.symbol_table);
+
+		if (node->data.conditional.result_type.pointer_level == 0 &&
+		    !node->data.conditional.result_type.is_array &&
+		    ((true_type.pointer_level > 0 || true_type.is_array) &&
+		     (false_type.pointer_level > 0 || false_type.is_array))) {
+
+			if (node->data.conditional.result_type.base_type) {
+				free(node->data.conditional.result_type.base_type);
+			}
+
+			node->data.conditional.result_type = deep_copy_type_info(&true_type);
+
+			if (node->data.conditional.result_type.is_array) {
+				node->data.conditional.result_type.is_array = 0;
+				node->data.conditional.result_type.pointer_level++;
+			}
+		}
+
+		char *result_type_str = get_llvm_type_string(&node->data.conditional.result_type);
+		fprintf(ctx.output, "  %%t%d.addr = alloca %s\n", result_temp, result_type_str);
 
 		// Evaluate condition
 		int cond = generate_expression(node->data.conditional.condition);
-		int bool_temp;
 
-		if (node->data.conditional.condition->type == AST_BINARY_OP &&
-		    is_comparison_op(node->data.conditional.condition->data.binary_op.op)) {
-			bool_temp = cond;
-		} else {
-			bool_temp = get_next_temp();
-			char cond_str[32];
-			if (node->data.conditional.condition->type == AST_NUMBER) {
-				snprintf(cond_str, sizeof(cond_str), "%d", cond);
-			} else {
-				snprintf(cond_str, sizeof(cond_str), "%%t%d", cond);
-			}
-			fprintf(ctx.output, "  %%t%d = icmp ne i32 %s, 0\n", bool_temp, cond_str);
-		}
+		int bool_temp = convert_to_boolean(node->data.conditional.condition, cond);
 
 		fprintf(ctx.output, "  br i1 %%t%d, label %%%s, label %%%s\n", bool_temp, true_label, false_label);
 
 		// True branch
 		fprintf(ctx.output, "%s:\n", true_label);
 		int true_val = generate_expression(node->data.conditional.true_expr);
-		if (node->data.conditional.true_expr->type == AST_NUMBER) {
-			fprintf(ctx.output, "  store %s %d, %s* %%t%d.addr\n", result_type, true_val, result_type,
-				result_temp);
+
+		// Handle constants or cast expression to match result type
+		if (node->data.conditional.true_expr->type == AST_NUMBER ||
+		    node->data.conditional.true_expr->type == AST_CHARACTER) {
+			if (node->data.conditional.result_type.pointer_level > 0 && true_val == 0) {
+				fprintf(ctx.output, "  store %s null, %s* %%t%d.addr\n", result_type_str,
+					result_type_str, result_temp);
+			} else {
+				fprintf(ctx.output, "  store %s %d, %s* %%t%d.addr\n", result_type_str, true_val,
+					result_type_str, result_temp);
+			}
 		} else {
-			fprintf(ctx.output, "  store %s %%t%d, %s* %%t%d.addr\n", result_type, true_val, result_type,
-				result_temp);
+			int casted_val = cast_value(true_val, &true_type, &node->data.conditional.result_type);
+			fprintf(ctx.output, "  store %s %%t%d, %s* %%t%d.addr\n", result_type_str, casted_val,
+				result_type_str, result_temp);
 		}
 		fprintf(ctx.output, "  br label %%%s\n", end_label);
 
 		// False branch
 		fprintf(ctx.output, "%s:\n", false_label);
 		int false_val = generate_expression(node->data.conditional.false_expr);
-		if (node->data.conditional.false_expr->type == AST_NUMBER) {
-			fprintf(ctx.output, "  store %s %d, %s* %%t%d.addr\n", result_type, false_val, result_type,
-				result_temp);
+
+		// Handle constants or cast expression to match result type
+		if (node->data.conditional.false_expr->type == AST_NUMBER ||
+		    node->data.conditional.false_expr->type == AST_CHARACTER) {
+			if (node->data.conditional.result_type.pointer_level > 0 && false_val == 0) {
+				fprintf(ctx.output, "  store %s null, %s* %%t%d.addr\n", result_type_str,
+					result_type_str, result_temp);
+			} else {
+				fprintf(ctx.output, "  store %s %d, %s* %%t%d.addr\n", result_type_str, false_val,
+					result_type_str, result_temp);
+			}
 		} else {
-			fprintf(ctx.output, "  store %s %%t%d, %s* %%t%d.addr\n", result_type, false_val, result_type,
-				result_temp);
+			int casted_val = cast_value(false_val, &false_type, &node->data.conditional.result_type);
+			fprintf(ctx.output, "  store %s %%t%d, %s* %%t%d.addr\n", result_type_str, casted_val,
+				result_type_str, result_temp);
 		}
 		fprintf(ctx.output, "  br label %%%s\n", end_label);
 
 		// End - load result
 		fprintf(ctx.output, "%s:\n", end_label);
 		int final_temp = get_next_temp();
-		fprintf(ctx.output, "  %%t%d = load %s, %s* %%t%d.addr\n", final_temp, result_type, result_type,
+		fprintf(ctx.output, "  %%t%d = load %s, %s* %%t%d.addr\n", final_temp, result_type_str, result_type_str,
 			result_temp);
 
-		free(result_type);
+		free_type_info(&true_type);
+		free_type_info(&false_type);
+		free(result_type_str);
 		free(true_label);
 		free(false_label);
 		free(end_label);
@@ -1607,26 +1677,73 @@ static int generate_expression(ast_node_t *node)
 	}
 
 	case AST_CALL: {
-		// Generate arguments
-		int *arg_temps = NULL;
+		symbol_t *func_sym = find_symbol(ctx.symbol_table, node->data.call.name);
+
+		int *arg_values = NULL;      // Holds temp IDs or constant values
+		char **arg_type_strs = NULL; // Holds type strings (e.g., "i32", "i64")
+		int *is_constant = NULL;     // Flags for constants
+
 		if (node->data.call.arg_count > 0) {
-			arg_temps = malloc(sizeof(int) * node->data.call.arg_count);
+			arg_values = malloc(sizeof(int) * node->data.call.arg_count);
+			arg_type_strs = malloc(sizeof(char *) * node->data.call.arg_count);
+			is_constant = malloc(sizeof(int) * node->data.call.arg_count);
+
 			for (int i = 0; i < node->data.call.arg_count; i++) {
-				arg_temps[i] = generate_expression(node->data.call.args[i]);
+				// Generate expression code
+				arg_values[i] = generate_expression(node->data.call.args[i]);
+
+				// Determine initial type
+				type_info_t arg_type = get_expression_type(node->data.call.args[i], ctx.symbol_table);
+				if (arg_type.is_array) {
+					arg_type.is_array = 0;
+					arg_type.pointer_level++;
+				}
+				arg_type_strs[i] = get_llvm_type_string(&arg_type);
+				free_type_info(&arg_type);
+
+				// Determine if constant
+				is_constant[i] = (node->data.call.args[i]->type == AST_NUMBER ||
+						  node->data.call.args[i]->type == AST_CHARACTER);
 			}
 		}
 
-		char *return_type = get_llvm_type_string(&node->data.call.return_type);
+		// 2. Perform Type Checking and emit ZEXT if needed (BEFORE printing call)
+		if (func_sym && func_sym->param_symbols) {
+			for (int i = 0; i < node->data.call.arg_count && i < func_sym->param_count; i++) {
+				type_info_t *expected = &func_sym->param_symbols[i]->data.parameter.type_info;
+				char *expected_str = get_llvm_type_string(expected);
 
-		// Check if function returns void
+				// Check for i32 -> i64 mismatch
+				if (strcmp(arg_type_strs[i], "i32") == 0 && strcmp(expected_str, "i64") == 0) {
+					if (is_constant[i]) {
+						// For constants, just change the type label (e.g. "i32 12" -> "i64 12")
+						free(arg_type_strs[i]);
+						arg_type_strs[i] = strdup("i64");
+					} else {
+						// For variables, emit ZEXT instruction
+						int zext_temp = get_next_temp();
+						fprintf(ctx.output, "  %%t%d = zext i32 %%t%d to i64\n", zext_temp,
+							arg_values[i]);
+
+						// Update to use the new temporary
+						arg_values[i] = zext_temp;
+						free(arg_type_strs[i]);
+						arg_type_strs[i] = strdup("i64");
+						is_constant[i] = 0; // It's now a temp register
+					}
+				}
+				free(expected_str);
+			}
+		}
+
+		// 3. Generate the CALL instruction
+		char *return_type = get_llvm_type_string(&node->data.call.return_type);
 		int returns_void = (strcmp(return_type, "void") == 0);
 		int temp = -1;
 
 		if (returns_void) {
-			// For void functions, don't assign to a temporary
 			fprintf(ctx.output, "  call %s @%s(", return_type, node->data.call.name);
 		} else {
-			// For non-void functions, assign to a temporary
 			temp = get_next_temp();
 			fprintf(ctx.output, "  %%t%d = call %s @%s(", temp, return_type, node->data.call.name);
 		}
@@ -1635,29 +1752,22 @@ static int generate_expression(ast_node_t *node)
 			if (i > 0)
 				fprintf(ctx.output, ", ");
 
-			// Determine argument type
-			type_info_t arg_type = get_expression_type(node->data.call.args[i], ctx.symbol_table);
-
-			if (arg_type.is_array) {
-				arg_type.is_array = 0;
-				arg_type.pointer_level++;
-			}
-
-			char *arg_type_str = get_llvm_type_string(&arg_type);
-
-			if (node->data.call.args[i]->type == AST_NUMBER) {
-				fprintf(ctx.output, "%s %d", arg_type_str, arg_temps[i]);
+			if (is_constant[i]) {
+				fprintf(ctx.output, "%s %d", arg_type_strs[i], arg_values[i]);
 			} else {
-				fprintf(ctx.output, "%s %%t%d", arg_type_str, arg_temps[i]);
+				fprintf(ctx.output, "%s %%t%d", arg_type_strs[i], arg_values[i]);
 			}
-
-			free(arg_type_str);
-			free_type_info(&arg_type);
 		}
-
 		fprintf(ctx.output, ")\n");
 
-		free(arg_temps);
+		// Cleanup
+		if (node->data.call.arg_count > 0) {
+			for (int i = 0; i < node->data.call.arg_count; i++)
+				free(arg_type_strs[i]);
+			free(arg_type_strs);
+			free(arg_values);
+			free(is_constant);
+		}
 		free(return_type);
 
 		// Return temp for non-void, -1 for void
@@ -2302,7 +2412,8 @@ static void generate_statement(ast_node_t *node)
 		if (node->data.return_stmt.value) {
 			int value = generate_expression(node->data.return_stmt.value);
 
-			if (node->data.return_stmt.value->type != AST_NUMBER) {
+			if (node->data.return_stmt.value->type != AST_NUMBER &&
+			    node->data.return_stmt.value->type != AST_CHARACTER) {
 				type_info_t expr_type =
 					get_expression_type(node->data.return_stmt.value, ctx.symbol_table);
 
@@ -2313,7 +2424,8 @@ static void generate_statement(ast_node_t *node)
 
 			char *return_type = get_llvm_type_string(&ctx.current_function_return_type);
 
-			if (node->data.return_stmt.value->type == AST_NUMBER) {
+			if (node->data.return_stmt.value->type == AST_NUMBER ||
+			    node->data.return_stmt.value->type == AST_CHARACTER) {
 				fprintf(ctx.output, "  ret %s %d\n", return_type, value);
 			} else {
 				fprintf(ctx.output, "  ret %s %%t%d\n", return_type, value);
@@ -2560,6 +2672,16 @@ void generate_llvm_ir(ast_node_t *ast, FILE *output)
 				func_sym->is_function_defined = 0;
 				func_sym->param_count = decl->data.function.param_count;
 				func_sym->is_variadic = decl->data.function.is_variadic;
+
+				if (decl->data.function.param_count > 0) {
+					func_sym->param_symbols =
+						malloc(sizeof(ast_node_t *) * decl->data.function.param_count);
+					for (int k = 0; k < decl->data.function.param_count; k++) {
+						func_sym->param_symbols[k] = decl->data.function.params[k];
+					}
+				} else {
+					func_sym->param_symbols = NULL;
+				}
 			}
 		}
 	}
